@@ -29,7 +29,6 @@ from telethon.tl.functions.auth import ResetAuthorizationsRequest
 import python_socks
 from supabase import create_client, Client
 
-# ==================== CONFIGURATION ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9096733224:AAEQ36LOZoPZpO78kjH-1WRvG9KnWo_vqs0")
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mchijfbwfxetqqfycwwv.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SERVICE_ROLE_KEY")
@@ -86,10 +85,8 @@ def parse_proxy(proxy_str: str):
 def get_settings():
     try:
         res = supabase.table("bot_settings").select("*").eq("id", 1).execute()
-        if res.data:
-            return res.data[0]
-    except Exception:
-        pass
+        if res.data: return res.data[0]
+    except: pass
     return {"bot_active": True, "enable_2fa": True, "withdraw_enabled": True, "accept_multiple_devices": False}
 
 def match_country(phone: str):
@@ -97,8 +94,7 @@ def match_country(phone: str):
     if not res.data: return None
     sorted_c = sorted(res.data, key=lambda x: len(x["country_code"]), reverse=True)
     for c in sorted_c:
-        if phone.startswith(c["country_code"]):
-            return c
+        if phone.startswith(c["country_code"]): return c
     return None
 
 async def check_single_device(session_str: str, dev_info: dict, proxy_str: str = "") -> tuple[bool, int]:
@@ -118,12 +114,11 @@ async def check_single_device(session_str: str, dev_info: dict, proxy_str: str =
         count = len(auths.authorizations)
         await client.disconnect()
         return True, count
-    except Exception:
+    except:
         try: await client.disconnect()
         except: pass
         return False, 0
 
-# ==================== CONFIRMATION & MULTI-DEVICE CHECK ====================
 async def schedule_confirmation_check(account_id: int, user_id: int, phone: str, wait_sec: int):
     await asyncio.sleep(wait_sec)
     res = supabase.table("accounts").select("*").eq("id", account_id).execute()
@@ -143,7 +138,6 @@ async def schedule_confirmation_check(account_id: int, user_id: int, phone: str,
         await bot.send_message(user_id, f"❌ <b>Account Rejected!</b>\nNumber: <code>{phone}</code>\nReason: Session logged out.", parse_mode="HTML")
         return
 
-    # Multi-device check
     if dev_count > 1:
         if cfg.get("accept_multiple_devices", False):
             await finalize_account_confirmation(acc)
@@ -153,13 +147,7 @@ async def schedule_confirmation_check(account_id: int, user_id: int, phone: str,
                 [InlineKeyboardButton(text="🔄 I Logged Out / Check Again", callback_data=f"chklogout_{account_id}")],
                 [InlineKeyboardButton(text="⚡ Force Logout Other Devices", callback_data=f"forcelogout_{account_id}")]
             ])
-            await bot.send_message(
-                user_id,
-                f"⚠️ <b>Multiple Devices Detected ({dev_count} devices)!</b>\n\n"
-                f"📱 Number: <code>{phone}</code>\n"
-                f"Confirmation time is over, but your phone/device is still logged in. Please log out from your phone and click below to verify!",
-                reply_markup=kb, parse_mode="HTML"
-            )
+            await bot.send_message(user_id, f"⚠️ <b>Multiple Devices Detected ({dev_count} devices)!</b>\n\n📱 Number: <code>{phone}</code>\nPlease log out from your phone and click below to verify!", reply_markup=kb, parse_mode="HTML")
     else:
         await finalize_account_confirmation(acc)
 
@@ -172,11 +160,7 @@ async def finalize_account_confirmation(acc: dict):
         new_conf = int(u["total_confirmed"]) + 1
         supabase.table("users").update({"balance": new_bal, "total_confirmed": new_conf}).eq("user_id", acc["submitted_by"]).execute()
 
-    await bot.send_message(
-        acc["submitted_by"],
-        f"✅ <b>Account Confirmed!</b>\n\n📱 Number: <code>{acc['phone']}</code>\n💵 Reward Added: <b>+${acc['price']}</b>",
-        parse_mode="HTML"
-    )
+    await bot.send_message(acc["submitted_by"], f"✅ <b>Account Confirmed!</b>\n\n📱 Number: <code>{acc['phone']}</code>\n💵 Reward Added: <b>+${acc['price']}</b>", parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("chklogout_"))
 async def cb_check_logout(call: CallbackQuery):
@@ -206,22 +190,18 @@ async def cb_force_logout(call: CallbackQuery):
     res = supabase.table("accounts").select("*").eq("id", acc_id).execute()
     if not res.data: return
     acc = res.data[0]
-    client = TelegramClient(
-        StringSession(acc["session_string"]), API_ID, API_HASH,
-        device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"]
-    )
+    client = TelegramClient(StringSession(acc["session_string"]), API_ID, API_HASH, device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"])
     try:
         await client.connect()
         await client(ResetAuthorizationsRequest())
         await client.disconnect()
         await call.message.delete()
         await finalize_account_confirmation(acc)
-    except Exception:
+    except:
         try: await client.disconnect()
         except: pass
         await call.answer("⚠️ Please log out manually from your phone settings.", show_alert=True)
 
-# ==================== USER COMMANDS & WITHDRAW ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -254,63 +234,34 @@ async def cmd_balance(message: Message):
     u = res.data[0]
     await message.answer(f"👤 <b>Your Balance:</b> <b>${float(u['balance']):.2f}</b>\nSubmitted: {u['total_submitted']} | Confirmed: {u['total_confirmed']}", parse_mode="HTML")
 
-# --- WITHDRAW MENU ---
 @dp.message(Command("withdraw"))
 async def cmd_withdraw(message: Message):
     uid = message.from_user.id
     u_res = supabase.table("users").select("*").eq("user_id", uid).execute()
     if not u_res.data: return await message.answer("Send /start first.")
     u = u_res.data[0]
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💸 Withdraw Now", callback_data="user_withdraw_action")]
-    ])
-    await message.answer(
-        f"💰 <b>Withdrawal Dashboard</b>\n\n"
-        f"👤 User: {message.from_user.full_name}\n"
-        f"🆔 User ID: <code>{uid}</code>\n"
-        f"✅ Confirmed Accounts: <b>{u['total_confirmed']}</b>\n"
-        f"💵 Available Balance: <b>${float(u['balance']):.2f}</b>",
-        reply_markup=kb, parse_mode="HTML"
-    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💸 Withdraw Now", callback_data="user_withdraw_action")]])
+    await message.answer(f"💰 <b>Withdrawal Dashboard</b>\n\n👤 User: {message.from_user.full_name}\n🆔 User ID: <code>{uid}</code>\n✅ Confirmed Accounts: <b>{u['total_confirmed']}</b>\n💵 Available Balance: <b>${float(u['balance']):.2f}</b>", reply_markup=kb, parse_mode="HTML")
 
 @dp.callback_query(F.data == "user_withdraw_action")
 async def cb_user_withdraw(call: CallbackQuery):
     cfg = get_settings()
-    if not cfg.get("withdraw_enabled", True):
-        return await call.answer("❌ Withdrawals are currently turned OFF by Admin!", show_alert=True)
-
+    if not cfg.get("withdraw_enabled", True): return await call.answer("❌ Withdrawals are currently turned OFF by Admin!", show_alert=True)
     uid = call.from_user.id
     u_res = supabase.table("users").select("*").eq("user_id", uid).execute()
-    if not u_res.data: return await call.answer("User not found!", show_alert=True)
+    if not u_res.data: return call.answer("User not found!", show_alert=True)
     u = u_res.data[0]
     bal = float(u["balance"])
-
-    if bal <= 0:
-        return await call.answer("❌ You have zero balance to withdraw!", show_alert=True)
+    if bal <= 0: return call.answer("❌ You have zero balance to withdraw!", show_alert=True)
 
     supabase.table("users").update({"balance": 0.0}).eq("user_id", uid).execute()
-
-    forward_text = (
-        f"🚨 <b>New Withdrawal Request!</b>\n\n"
-        f"👤 Name: {call.from_user.full_name}\n"
-        f"🆔 User ID: <code>{uid}</code>\n"
-        f"🔗 Username: @{call.from_user.username or 'None'}\n"
-        f"💵 Amount Withdrawn: <b>${bal:.2f}</b>\n"
-        f"✅ Total Confirmed: {u['total_confirmed']}"
-    )
-    try:
-        await bot.send_message(FORWARD_USERNAME, forward_text, parse_mode="HTML")
-    except Exception:
-        try: await bot.send_message(ADMIN_ID, f"[Forward Failed to {FORWARD_USERNAME}]\n\n" + forward_text, parse_mode="HTML")
+    forward_text = f"🚨 <b>New Withdrawal Request!</b>\n\n👤 Name: {call.from_user.full_name}\n🆔 User ID: <code>{uid}</code>\n🔗 Username: @{call.from_user.username or 'None'}\n💵 Amount Withdrawn: <b>${bal:.2f}</b>\n✅ Total Confirmed: {u['total_confirmed']}"
+    try: await bot.send_message(FORWARD_USERNAME, forward_text, parse_mode="HTML")
+    except:
+        try: await bot.send_message(ADMIN_ID, f"[Forward Failed]\n\n" + forward_text, parse_mode="HTML")
         except: pass
 
-    await call.message.edit_text(
-        f"✅ <b>Withdrawal Complete!</b>\n\n"
-        f"Successfully requested withdrawal of <b>${bal:.2f}</b>.\n"
-        f"Notification sent to admin successfully!",
-        parse_mode="HTML"
-    )
+    await call.message.edit_text(f"✅ <b>Withdrawal Complete!</b>\n\nSuccessfully requested withdrawal of <b>${bal:.2f}</b>.\nNotification sent to admin successfully!", parse_mode="HTML")
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -389,48 +340,35 @@ async def cb_rejected_list(call: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")]])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# Admin Force Logout Hub + ALL Force Logout Button
 @dp.callback_query(F.data == "adm_force_mgr")
 async def cb_force_mgr(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
     res = supabase.table("accounts").select("*").eq("status", "waiting_logout").execute()
     count = len(res.data) if res.data else 0
-    
-    buttons = [
-        [InlineKeyboardButton(text=f"🚀 Force Logout ALL Waiting Accounts ({count})", callback_data="adforcelog_all")]
-    ]
+    buttons = [[InlineKeyboardButton(text=f"🚀 Force Logout ALL Waiting Accounts ({count})", callback_data="adforcelog_all")]]
     if res.data:
         for acc in res.data[:10]:
             buttons.append([InlineKeyboardButton(text=f"⚡ Logout {acc['phone']}", callback_data=f"adforcelog_{acc['id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")])
-    
-    await call.message.edit_text(
-        f"⚡ <b>Force Logout Manager</b>\nWaiting for logout: {count} accounts.\nClick below to force logout all at once or individually:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML"
-    )
+    await call.message.edit_text(f"⚡ <b>Force Logout Manager</b>\nWaiting for logout: {count} accounts.", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("adforcelog_"))
 async def cb_admin_force_action(call: CallbackQuery):
     target = call.data.split("_")[1]
-    
     if target == "all":
-        await call.answer("🚀 Processing force logout for ALL waiting accounts...", show_alert=True)
+        await call.answer("🚀 Processing force logout...", show_alert=True)
         res = supabase.table("accounts").select("*").eq("status", "waiting_logout").execute()
-        if not res.data: return await call.answer("No accounts to logout!", show_alert=True)
-        
+        if not res.data: return await call.answer("No accounts!", show_alert=True)
         success_count = 0
         for acc in res.data:
-            client = TelegramClient(
-                StringSession(acc["session_string"]), API_ID, API_HASH,
-                device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"]
-            )
+            client = TelegramClient(StringSession(acc["session_string"]), API_ID, API_HASH, device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"])
             try:
                 await client.connect()
                 await client(ResetAuthorizationsRequest())
                 await client.disconnect()
                 await finalize_account_confirmation(acc)
                 success_count += 1
-            except Exception:
+            except:
                 try: await client.disconnect()
                 except: pass
         await call.message.edit_text(f"✅ Successfully force logged out <b>{success_count}</b> accounts!", reply_markup=admin_main_kb(), parse_mode="HTML")
@@ -439,20 +377,83 @@ async def cb_admin_force_action(call: CallbackQuery):
         res = supabase.table("accounts").select("*").eq("id", acc_id).execute()
         if not res.data: return
         acc = res.data[0]
-        client = TelegramClient(
-            StringSession(acc["session_string"]), API_ID, API_HASH,
-            device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"]
-        )
+        client = TelegramClient(StringSession(acc["session_string"]), API_ID, API_HASH, device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"])
         try:
             await client.connect()
             await client(ResetAuthorizationsRequest())
             await client.disconnect()
             await finalize_account_confirmation(acc)
-            await call.answer("✅ Successfully forced logout and confirmed account!", show_alert=True)
-        except Exception as e:
+            await call.answer("✅ Successfully forced logout!", show_alert=True)
+        except:
             try: await client.disconnect()
             except: pass
-            await call.answer(f"❌ Failed: {e}", show_alert=True)
+            await call.answer("⚠️ Failed", show_alert=True)
+
+# --- EXPORT MENU WITH 3 OPTIONS ---
+@dp.callback_query(F.data == "adm_export")
+async def cb_adm_export(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID: return
+    conf = supabase.table("accounts").select("id", count="exact").eq("status", "confirmed").execute().count or 0
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📄 Only .session [{conf}]", callback_data="exp_session_confirmed")],
+        [InlineKeyboardButton(text=f"📋 Only .json [{conf}]", callback_data="exp_json_confirmed")],
+        [InlineKeyboardButton(text=f"📦 Both (.session + .json) [{conf}]", callback_data="exp_both_confirmed")],
+        [InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")]
+    ])
+    await call.message.edit_text(f"📦 <b>Account Session Exporter</b>\n\nConfirmed Ready: {conf}\nSelect export format:", reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(F.data.startswith("exp_"))
+async def cb_run_export(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID: return
+    _, fmt, target_status = call.data.split("_")
+    res = supabase.table("accounts").select("*").eq("status", target_status).execute()
+    if not res.data: return await call.answer("No accounts available!", show_alert=True)
+
+    await call.answer("⚙️ Generating ZIP archive...")
+    zip_buffer = BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for acc in res.data:
+            clean_p = acc["phone"].replace("+", "")
+            sub_id = acc["submitted_by"]
+            prefix = f"User_{sub_id}/{clean_p}"
+
+            if fmt in ["json", "both"]:
+                j_content = {
+                    "session_file": clean_p,
+                    "phone": acc["phone"],
+                    "user_id": acc["tg_user_id"],
+                    "submitted_by_user_id": sub_id,
+                    "app_id": API_ID,
+                    "app_hash": API_HASH,
+                    "sdk": acc["system_version"],
+                    "app_version": acc["app_version"],
+                    "device": acc["device_model"],
+                    "lang_pack": "tdesktop",
+                    "lang_code": "en",
+                    "system_lang_code": "en-US",
+                    "twoFA": acc["two_fa"],
+                    "spam_status": acc["spam_status"]
+                }
+                zf.writestr(f"{prefix}.json", json.dumps(j_content, indent=4))
+
+            if fmt in ["session", "both"]:
+                tmp_file = f"tmp_{clean_p}.session"
+                s_str = StringSession(acc["session_string"])
+                sql_s = SQLiteSession(tmp_file)
+                sql_s.set_dc(s_str.dc_id, s_str.server_address, s_str.port)
+                sql_s.auth_key = s_str.auth_key
+                sql_s.save()
+                sql_s.close()
+                with open(tmp_file, "rb") as f:
+                    zf.writestr(f"{prefix}.session", f.read())
+                os.remove(tmp_file)
+
+            supabase.table("accounts").update({"status": "downloaded"}).eq("id", acc["id"]).execute()
+
+    zip_buffer.seek(0)
+    file_name = f"Accounts_{fmt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    await call.message.answer_document(BufferedInputFile(zip_buffer.read(), filename=file_name), caption=f"✅ Exported {len(res.data)} accounts ({fmt.upper()}).", parse_mode="HTML")
+    await cb_adm_export(call)
 
 # --- COUNTRY MANAGEMENT ---
 @dp.callback_query(F.data == "adm_countries")
@@ -462,10 +463,7 @@ async def cb_adm_countries(call: CallbackQuery):
     buttons = [[InlineKeyboardButton(text="➕ Add New Country", callback_data="adm_add_country")]]
     for c in res.data:
         st = "✅" if c["is_active"] else "❌"
-        buttons.append([
-            InlineKeyboardButton(text=f"{st} {c['country_name']} ({c['country_code']}) - ${c['price']} | Cap: {c['capacity']}", callback_data=f"togc_{c['country_code']}"),
-            InlineKeyboardButton(text="🗑️", callback_data=f"delc_{c['country_code']}")
-        ])
+        buttons.append([InlineKeyboardButton(text=f"{st} {c['country_name']} ({c['country_code']}) - ${c['price']} | Cap: {c['capacity']}", callback_data=f"togc_{c['country_code']}"), InlineKeyboardButton(text="🗑️", callback_data=f"delc_{c['country_code']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")])
     await call.message.edit_text("🌍 <b>Country & Capacity Manager</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
@@ -493,78 +491,43 @@ async def step_c_code(message: Message, state: FSMContext):
     if not code.startswith("+"): code = "+" + code
     await state.update_data(code=code)
     await state.set_state(AdminFlow.add_c_name)
-    await message.answer("Enter Country Name (e.g. <code>Colombia</code>):", parse_mode="HTML")
+    await message.answer("Enter Country Name:", parse_mode="HTML")
 
 @dp.message(AdminFlow.add_c_name)
 async def step_c_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(AdminFlow.add_c_price)
-    await message.answer("Enter Price in USD (e.g. <code>0.25</code>):", parse_mode="HTML")
+    await message.answer("Enter Price in USD (e.g. 0.25):", parse_mode="HTML")
 
 @dp.message(AdminFlow.add_c_price)
 async def step_c_price(message: Message, state: FSMContext):
     await state.update_data(price=float(message.text.strip()))
     await state.set_state(AdminFlow.add_c_cap)
-    await message.answer("Enter Capacity limit (e.g. <code>500</code>):", parse_mode="HTML")
+    await message.answer("Enter Capacity limit:", parse_mode="HTML")
 
 @dp.message(AdminFlow.add_c_cap)
 async def step_c_cap(message: Message, state: FSMContext):
     await state.update_data(cap=int(message.text.strip()))
     await state.set_state(AdminFlow.add_c_time)
-    await message.answer("Enter Confirmation Wait Time in seconds (e.g. <code>600</code>):", parse_mode="HTML")
+    await message.answer("Enter Confirmation Wait Time in seconds:", parse_mode="HTML")
 
 @dp.message(AdminFlow.add_c_time)
 async def step_c_time(message: Message, state: FSMContext):
     await state.update_data(time_sec=int(message.text.strip()))
     await state.set_state(AdminFlow.add_c_proxy)
-    await message.answer("Enter SOCKS5 Proxy (<code>ip:port:user:pass</code>) or type <code>none</code>:", parse_mode="HTML")
+    await message.answer("Enter SOCKS5 Proxy or type none:", parse_mode="HTML")
 
 @dp.message(AdminFlow.add_c_proxy)
 async def step_c_proxy(message: Message, state: FSMContext):
     data = await state.get_data()
     proxy = "" if message.text.strip().lower() == "none" else message.text.strip()
     supabase.table("countries").upsert({
-        "country_code": data["code"],
-        "country_name": data["name"],
-        "price": data["price"],
-        "capacity": data["cap"],
-        "confirm_time_sec": data["time_sec"],
-        "proxy_url": proxy,
-        "is_active": True
+        "country_code": data["code"], "country_name": data["name"],
+        "price": data["price"], "capacity": data["cap"],
+        "confirm_time_sec": data["time_sec"], "proxy_url": proxy, "is_active": True
     }).execute()
     await state.clear()
-    await message.answer(f"✅ Country <b>{data['name']}</b> saved!", reply_markup=admin_main_kb(), parse_mode="HTML")
-
-# --- EXPORT & BROADCAST & RESTART ---
-@dp.callback_query(F.data == "adm_export")
-async def cb_adm_export(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    conf = supabase.table("accounts").select("id", count="exact").eq("status", "confirmed").execute().count or 0
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"📦 Download Confirmed (Both .session + .json) [{conf}]", callback_data="exp_both_confirmed")],
-        [InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")]
-    ])
-    await call.message.edit_text("📦 <b>Account Exporter</b>", reply_markup=kb, parse_mode="HTML")
-
-@dp.callback_query(F.data.startswith("exp_"))
-async def cb_run_export(call: CallbackQuery):
-    if call.from_user.id != ADMIN_ID: return
-    _, fmt, target_status = call.data.split("_")
-    res = supabase.table("accounts").select("*").eq("status", target_status).execute()
-    if not res.data: return await call.answer("No accounts!", show_alert=True)
-
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for acc in res.data:
-            clean_p = acc["phone"].replace("+", "")
-            sub_id = acc["submitted_by"]
-            prefix = f"User_{sub_id}/{clean_p}"
-            j_content = {"phone": acc["phone"], "user_id": acc["tg_user_id"], "twoFA": acc["two_fa"]}
-            zf.writestr(f"{prefix}.json", json.dumps(j_content, indent=4))
-            supabase.table("accounts").update({"status": "downloaded"}).eq("id", acc["id"]).execute()
-    zip_buffer.seek(0)
-    await call.message.answer_document(BufferedInputFile(zip_buffer.read(), filename="Accounts.zip"))
-    await cb_adm_export(call)
+    await message.answer(f"✅ Country saved!", reply_markup=admin_main_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def cb_broadcast(call: CallbackQuery, state: FSMContext):
@@ -585,7 +548,7 @@ async def cb_restart(call: CallbackQuery):
     await call.message.edit_text("🔄 Restarting...")
     os.execv(sys.executable, ['python'] + sys.argv)
 
-# ==================== PHONE & OTP HANDLER ====================
+# ==================== OTP & PHONE HANDLER (UPSERT FIXED) ====================
 @dp.message(UserFlow.waiting_otp)
 async def handle_otp_input(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -615,7 +578,7 @@ async def handle_existing_2fa(message: Message, state: FSMContext):
     try:
         await client.sign_in(password=message.text.strip())
         await complete_account_setup(message, state, uid, old_2fa=message.text.strip())
-    except Exception:
+    except:
         await message.answer("❌ Wrong 2FA password!")
 
 async def complete_account_setup(message: Message, state: FSMContext, uid: int, old_2fa: str = None):
@@ -642,13 +605,15 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
         sess_str = client.session.save()
         await client.disconnect()
 
-        ins = supabase.table("accounts").insert({
+        # UPSERT to prevent duplicate phone key constraint error
+        ins = supabase.table("accounts").upsert({
             "phone": phone, "country_code": country["country_code"], "tg_user_id": me.id,
             "submitted_by": uid, "session_string": sess_str, "two_fa": final_2fa,
             "device_model": dev["device"], "system_version": dev["sdk"], "app_version": dev["app"],
-            "price": country["price"], "status": "pending"
-        }).execute()
-        acc_id = ins.data[0]["id"]
+            "price": country["price"], "status": "pending", "reject_reason": ""
+        }, on_conflict="phone").execute()
+        
+        acc_id = ins.data[0]["id"] if ins.data else 1
 
         u_res = supabase.table("users").select("total_submitted").eq("user_id", uid).execute()
         if u_res.data:
