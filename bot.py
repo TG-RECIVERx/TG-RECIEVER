@@ -24,14 +24,15 @@ from telethon.errors import (
     SessionPasswordNeededError, PhoneCodeInvalidError,
     PhoneCodeExpiredError, FloodWaitError
 )
-from telethon.tl.functions.account import GetAuthorizationsRequest, ResetAuthorizationsRequest
+from telethon.tl.functions.account import GetAuthorizationsRequest
+from telethon.tl.functions.auth import ResetAuthorizationsRequest
 import python_socks
 from supabase import create_client, Client
 
 # ==================== CONFIGURATION ====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "9096733224:AAEQ36LOZoPZpO78kjH-1WRvG9KnWo_vqs0")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "YOUR_SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mchijfbwfxetqqfycwwv.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SERVICE_ROLE_KEY")
 ADMIN_ID = 7266067201
 
 # Official Telegram Desktop API
@@ -93,7 +94,6 @@ def match_country(phone: str):
     res = supabase.table("countries").select("*").eq("is_active", True).execute()
     if not res.data:
         return None
-    # Sort by longest prefix first (e.g., +880 before +8)
     sorted_c = sorted(res.data, key=lambda x: len(x["country_code"]), reverse=True)
     for c in sorted_c:
         if phone.startswith(c["country_code"]):
@@ -101,9 +101,6 @@ def match_country(phone: str):
     return None
 
 async def check_single_device(session_str: str, dev_info: dict, proxy_str: str = "") -> tuple[bool, int]:
-    """
-    Returns (is_alive, total_devices_count)
-    """
     client = TelegramClient(
         StringSession(session_str), API_ID, API_HASH,
         device_model=dev_info.get("device", "PC 64bit"),
@@ -249,7 +246,7 @@ async def cb_force_logout(call: CallbackQuery):
             pass
         await call.answer("⚠️ Telegram security requires manual logout from your phone before 24h. Please log out from your phone settings!", show_alert=True)
 
-# ==================== USER MENU COMMANDS (/start, /cancel, /capacity, /balance, /help) ====================
+# ==================== USER MENU COMMANDS ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -323,7 +320,7 @@ async def cmd_help(message: Message):
         parse_mode="HTML"
     )
 
-# ==================== ADMIN PANEL (/admin) ====================
+# ==================== ADMIN PANEL ====================
 def admin_main_kb():
     cfg = get_settings()
     b_status = "🟢 ON" if cfg.get("bot_active", True) else "🔴 OFF"
@@ -472,7 +469,7 @@ async def step_c_proxy(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ Country <b>{data['name']} ({data['code']})</b> saved!", reply_markup=admin_main_kb(), parse_mode="HTML")
 
-# --- 1-CLICK EXPORT (.session, .json, Both ZIP) ---
+# --- 1-CLICK EXPORT ---
 @dp.callback_query(F.data == "adm_export")
 async def cb_adm_export(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -605,7 +602,7 @@ async def cb_restart(call: CallbackQuery):
     await call.message.edit_text("🔄 Bot is restarting...")
     os.execv(sys.executable, ['python'] + sys.argv)
 
-# ==================== USER PHONE & OTP RECEIVER ENGINE ====================
+# ==================== PHONE & OTP RECEIVER ====================
 @dp.message(UserFlow.waiting_otp)
 async def handle_otp_input(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -657,13 +654,10 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
 
     try:
         me = await client.get_me()
-        # 1. Human-like anti-freeze delay
         await asyncio.sleep(random.uniform(2.5, 4.0))
 
-        # 2. Send branding note in Saved Messages
         await client.send_message("me", cfg.get("saved_msg_text", "Colombia Empire By Mahin"))
 
-        # 3. Check @SpamBot
         spam_status = "Free"
         try:
             async with client.conversation("@SpamBot", timeout=8) as conv:
@@ -683,7 +677,6 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
             await state.clear()
             return await status_msg.edit_text("❌ <b>Account Rejected!</b>\nReason: Account is Limited/Frozen on @SpamBot.", parse_mode="HTML")
 
-        # 4. Set Custom 2FA if enabled
         final_2fa = old_2fa or ""
         if cfg.get("enable_2fa", True) and cfg.get("two_fa_pass"):
             new_pass = cfg["two_fa_pass"]
@@ -696,7 +689,6 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
         sess_str = client.session.save()
         await client.disconnect()
 
-        # Save to Supabase
         ins = supabase.table("accounts").insert({
             "phone": phone,
             "country_code": country["country_code"],
@@ -713,7 +705,6 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
         }).execute()
         acc_id = ins.data[0]["id"]
 
-        # Update user total submitted count
         u_res = supabase.table("users").select("total_submitted").eq("user_id", uid).execute()
         if u_res.data:
             supabase.table("users").update({"total_submitted": u_res.data[0]["total_submitted"] + 1}).eq("user_id", uid).execute()
@@ -730,7 +721,6 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
             parse_mode="HTML"
         )
 
-        # Start background timer
         asyncio.create_task(schedule_confirmation_check(acc_id, uid, phone, wait_s))
 
     except Exception as e:
@@ -741,7 +731,6 @@ async def complete_account_setup(message: Message, state: FSMContext, uid: int, 
         await state.clear()
         await status_msg.edit_text(f"❌ Error during verification: {e}")
 
-# Catch phone numbers sent by user
 @dp.message(F.text)
 async def handle_phone_submission(message: Message, state: FSMContext):
     if message.text.startswith("/"):
@@ -754,17 +743,14 @@ async def handle_phone_submission(message: Message, state: FSMContext):
     if not phone:
         return await message.answer("❌ Invalid phone number format! Send a valid number with country code (e.g. <code>+88017...</code> or <code>+57300...</code>).", parse_mode="HTML")
 
-    # 1. Duplicate Check (Block if pending, waiting_logout, confirmed, or downloaded)
     existing = supabase.table("accounts").select("status").eq("phone", phone).execute()
     if existing.data:
         st = existing.data[0]["status"]
         if st in ["pending", "waiting_logout", "confirmed", "downloaded"]:
             return await message.answer(f"⚠️ <b>Duplicate Number!</b>\n<code>{phone}</code> is already <b>{st.upper()}</b> in our system and cannot be submitted again.", parse_mode="HTML")
         else:
-            # If previously rejected, remove old row to allow fresh retry
             supabase.table("accounts").delete().eq("phone", phone).execute()
 
-    # 2. Match Country
     country = match_country(phone)
     if not country:
         return await message.answer("❌ Bot is not accepting numbers from this country right now. Check /capacity for open countries.")
@@ -803,9 +789,8 @@ async def handle_phone_submission(message: Message, state: FSMContext):
         await client.disconnect()
         await wait_msg.edit_text(f"❌ Failed to send code: {e}")
 
-# ==================== MENU SETUP & RENDER WEB SERVER ====================
+# ==================== RENDER WEB SERVER & MAIN RUNNER ====================
 async def setup_bot_commands():
-    # Exact menu commands from your screenshot
     commands = [
         BotCommand(command="start", description="Start"),
         BotCommand(command="cancel", description="Cancel"),
@@ -816,7 +801,7 @@ async def setup_bot_commands():
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
 async def health_check(request):
-    return web.Response(text="Bot is running 24/7!")
+    return web.Response(text="Bot is running 24/7 successfully!")
 
 async def start_web_server():
     app = web.Application()
