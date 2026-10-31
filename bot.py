@@ -34,6 +34,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "9096733224:AAEQ36LOZoPZpO78kjH-1WRvG9KnWo_vq
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mchijfbwfxetqqfycwwv.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SERVICE_ROLE_KEY")
 ADMIN_ID = 7266067201
+FORWARD_USERNAME = "@syedmahinislam"
 
 API_ID = 2040
 API_HASH = "b18441a1ff607e10a989891a5462e627"
@@ -88,8 +89,7 @@ def get_settings():
 
 def match_country(phone: str):
     res = supabase.table("countries").select("*").eq("is_active", True).execute()
-    if not res.data:
-        return None
+    if not res.data: return None
     sorted_c = sorted(res.data, key=lambda x: len(x["country_code"]), reverse=True)
     for c in sorted_c:
         if phone.startswith(c["country_code"]):
@@ -114,21 +114,17 @@ async def check_single_device(session_str: str, dev_info: dict, proxy_str: str =
         await client.disconnect()
         return True, count
     except Exception:
-        try:
-            await client.disconnect()
-        except Exception:
-            pass
+        try: await client.disconnect()
+        except: pass
         return False, 0
 
-# ==================== CONFIRMATION & 24H TIMER ====================
+# ==================== CONFIRMATION & MULTI-DEVICE LOGIC ====================
 async def schedule_confirmation_check(account_id: int, user_id: int, phone: str, wait_sec: int):
     await asyncio.sleep(wait_sec)
     res = supabase.table("accounts").select("*").eq("id", account_id).execute()
-    if not res.data:
-        return
+    if not res.data: return
     acc = res.data[0]
-    if acc["status"] != "pending":
-        return
+    if acc["status"] != "pending": return
 
     c_res = supabase.table("countries").select("*").eq("country_code", acc["country_code"]).execute()
     proxy_url = c_res.data[0]["proxy_url"] if c_res.data else ""
@@ -138,14 +134,13 @@ async def schedule_confirmation_check(account_id: int, user_id: int, phone: str,
     is_alive, dev_count = await check_single_device(acc["session_string"], dev_info, proxy_url)
 
     if not is_alive:
-        supabase.table("accounts").update({"status": "rejected", "reject_reason": "Session dead or logged out before timer."}).eq("id", account_id).execute()
-        await bot.send_message(user_id, f"❌ <b>Account Rejected!</b>\nNumber: <code>{phone}</code>\nReason: Session was terminated or logged out.", parse_mode="HTML")
+        supabase.table("accounts").update({"status": "rejected", "reject_reason": "Session dead before timer."}).eq("id", account_id).execute()
+        await bot.send_message(user_id, f"❌ <b>Account Rejected!</b>\nNumber: <code>{phone}</code>\nReason: Session logged out.", parse_mode="HTML")
         return
 
-    # If multiple devices active
+    # Multi-device logic: Bot chara onno device (phone) login thakle
     if dev_count > 1:
         if cfg.get("accept_multiple_devices", False):
-            # Admin enabled accepting multi-device accounts anyway
             await finalize_account_confirmation(acc)
         else:
             supabase.table("accounts").update({"status": "waiting_logout"}).eq("id", account_id).execute()
@@ -155,9 +150,9 @@ async def schedule_confirmation_check(account_id: int, user_id: int, phone: str,
             ])
             await bot.send_message(
                 user_id,
-                f"⚠️ <b>Multiple Devices Logged In ({dev_count} devices)!</b>\n\n"
+                f"⚠️ <b>Multiple Devices Detected ({dev_count} devices)!</b>\n\n"
                 f"📱 Number: <code>{phone}</code>\n"
-                f"Please log out from your phone and click the button below to verify!",
+                f"Confirmation time is over, but your phone/device is still logged in. Please log out from your phone and click below to get your balance!",
                 reply_markup=kb, parse_mode="HTML"
             )
     else:
@@ -182,20 +177,20 @@ async def finalize_account_confirmation(acc: dict):
 async def cb_check_logout(call: CallbackQuery):
     acc_id = int(call.data.split("_")[1])
     res = supabase.table("accounts").select("*").eq("id", acc_id).execute()
-    if not res.data: return await call.answer("Account not found!", show_alert=True)
+    if not res.data: return await call.answer("Not found!", show_alert=True)
     acc = res.data[0]
-    if acc["status"] == "confirmed": return await call.message.edit_text(f"✅ Already confirmed!", parse_mode="HTML")
+    if acc["status"] == "confirmed": return await call.message.edit_text("✅ Already confirmed!", parse_mode="HTML")
 
-    await call.answer("🔍 Checking devices...")
+    await call.answer("🔍 Checking active devices...")
     dev_info = {"device": acc["device_model"], "sdk": acc["system_version"], "app": acc["app_version"]}
     is_alive, dev_count = await check_single_device(acc["session_string"], dev_info)
 
     if not is_alive:
-        supabase.table("accounts").update({"status": "rejected", "reject_reason": "Bot session logged out."}).eq("id", acc_id).execute()
-        return await call.message.edit_text(f"❌ <b>Invalid/Rejected!</b> Session is dead.", parse_mode="HTML")
+        supabase.table("accounts").update({"status": "rejected", "reject_reason": "Bot session dead."}).eq("id", acc_id).execute()
+        return await call.message.edit_text("❌ Session is dead or invalid.", parse_mode="HTML")
 
     if dev_count > 1:
-        return await call.answer(f"❌ Still {dev_count} devices active! Log out from phone first.", show_alert=True)
+        return await call.answer(f"❌ Still {dev_count} devices active! Please log out from your phone first.", show_alert=True)
 
     await call.message.delete()
     await finalize_account_confirmation(acc)
@@ -213,20 +208,15 @@ async def cb_force_logout(call: CallbackQuery):
     try:
         await client.connect()
         await client(ResetAuthorizationsRequest())
-        auths = await client(GetAuthorizationsRequest())
-        count = len(auths.authorizations)
         await client.disconnect()
-        if count == 1:
-            await call.message.delete()
-            await finalize_account_confirmation(acc)
-        else:
-            await call.answer("⚠️ Telegram restriction: Wait 24h or manual logout from phone.", show_alert=True)
+        await call.message.delete()
+        await finalize_account_confirmation(acc)
     except Exception:
         try: await client.disconnect()
         except: pass
-        await call.answer("⚠️ Manual logout required from device settings.", show_alert=True)
+        await call.answer("⚠️ Please log out manually from your phone settings.", show_alert=True)
 
-# ==================== USER COMMANDS ====================
+# ==================== USER COMMANDS & WITHDRAW ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -259,11 +249,71 @@ async def cmd_balance(message: Message):
     u = res.data[0]
     await message.answer(f"👤 <b>Your Balance:</b> <b>${float(u['balance']):.2f}</b>\nSubmitted: {u['total_submitted']} | Confirmed: {u['total_confirmed']}", parse_mode="HTML")
 
+# --- WITHDRAW MENU & BUTTONS ---
+@dp.message(Command("withdraw"))
+async def cmd_withdraw(message: Message):
+    uid = message.from_user.id
+    u_res = supabase.table("users").select("*").eq("user_id", uid).execute()
+    if not u_res.data: return await message.answer("Send /start first.")
+    u = u_res.data[0]
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💸 Withdraw Now", callback_data="user_withdraw_action")]
+    ])
+    await message.answer(
+        f"💰 <b>Withdrawal Dashboard</b>\n\n"
+        f"👤 User: {message.from_user.full_name}\n"
+        f"🆔 User ID: <code>{uid}</code>\n"
+        f"✅ Confirmed Accounts: <b>{u['total_confirmed']}</b>\n"
+        f"💵 Available Balance: <b>${float(u['balance']):.2f}</b>",
+        reply_markup=kb, parse_mode="HTML"
+    )
+
+@dp.callback_query(F.data == "user_withdraw_action")
+async def cb_user_withdraw(call: CallbackQuery):
+    cfg = get_settings()
+    if not cfg.get("withdraw_enabled", True):
+        return await call.answer("❌ Withdrawals are currently turned OFF by Admin!", show_alert=True)
+
+    uid = call.from_user.id
+    u_res = supabase.table("users").select("*").eq("user_id", uid).execute()
+    if not u_res.data: return call.answer("User not found!", show_alert=True)
+    u = u_res.data[0]
+    bal = float(u["balance"])
+
+    if bal <= 0:
+        return await call.answer("❌ You have zero balance to withdraw!", show_alert=True)
+
+    # Reset balance to 0
+    supabase.table("users").update({"balance": 0.0}).eq("user_id", uid).execute()
+
+    # Forward message to @syedmahinislam
+    forward_text = (
+        f"🚨 <b>New Withdrawal Request!</b>\n\n"
+        f"👤 Name: {call.from_user.full_name}\n"
+        f"🆔 User ID: <code>{uid}</code>\n"
+        f"🔗 Username: @{call.from_user.username or 'None'}\n"
+        f"💵 Amount Withdrawn: <b>${bal:.2f}</b>\n"
+        f"✅ Total Confirmed: {u['total_confirmed']}"
+    )
+    try:
+        await bot.send_message(FORWARD_USERNAME, forward_text, parse_mode="HTML")
+    except Exception:
+        try: await bot.send_message(ADMIN_ID, f"[Forward Failed to {FORWARD_USERNAME}]\n\n" + forward_text, parse_mode="HTML")
+        except: pass
+
+    await call.message.edit_text(
+        f"✅ <b>Withdrawal Complete!</b>\n\n"
+        f"Successfully requested withdrawal of <b>${bal:.2f}</b>.\n"
+        f"Notification sent to admin successfully!",
+        parse_mode="HTML"
+    )
+
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer("ℹ️ Send phone number -> Enter OTP -> Wait for timer / logout -> Get balance!", parse_mode="HTML")
+    await message.answer("ℹ️ Send phone number -> Enter OTP -> Wait for timer / logout -> Use /withdraw to cash out!", parse_mode="HTML")
 
-# ==================== ADMIN PANEL ====================
+# ==================== ADMIN PANEL (FIXED WITHDRAW TOGGLE) ====================
 def admin_main_kb():
     cfg = get_settings()
     b_st = "🟢 ON" if cfg.get("bot_active", True) else "🔴 OFF"
@@ -298,7 +348,8 @@ async def cb_toggle_bot(call: CallbackQuery):
 @dp.callback_query(F.data == "adm_toggle_withdraw")
 async def cb_toggle_wd(call: CallbackQuery):
     cfg = get_settings()
-    supabase.table("bot_settings").update({"withdraw_enabled": not cfg["withdraw_enabled"]}).eq("id", 1).execute()
+    current_status = cfg.get("withdraw_enabled", True)
+    supabase.table("bot_settings").update({"withdraw_enabled": not current_status}).eq("id", 1).execute()
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
 
 @dp.callback_query(F.data == "adm_toggle_2fa")
@@ -313,55 +364,83 @@ async def cb_toggle_multi(call: CallbackQuery):
     supabase.table("bot_settings").update({"accept_multiple_devices": not cfg["accept_multiple_devices"]}).eq("id", 1).execute()
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
 
-# Rejected / Invalid list viewer for admin
 @dp.callback_query(F.data == "adm_rejected_list")
 async def cb_rejected_list(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
     res = supabase.table("accounts").select("*").eq("status", "rejected").execute()
-    if not res.data:
-        return await call.answer("No rejected accounts found!", show_alert=True)
-    text = "❌ <b>Rejected / Invalid Accounts List:</b>\n\n"
+    if not res.data: return await call.answer("No rejected accounts!", show_alert=True)
+    text = "❌ <b>Rejected Accounts List:</b>\n\n"
     for acc in res.data[:15]:
-        text += f"📱 <code>{acc['phone']}</code>\n👤 User ID: <code>{acc['submitted_by']}</code>\nReason: {acc['reject_reason']}\n──────────────────\n"
+        text += f"📱 <code>{acc['phone']}</code>\n👤 User: <code>{acc['submitted_by']}</code>\nReason: {acc['reject_reason']}\n──────────────────\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")]])
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# Admin Force Logout Hub
+# Admin Force Logout Hub + ALL Force Logout Button
 @dp.callback_query(F.data == "adm_force_mgr")
 async def cb_force_mgr(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
     res = supabase.table("accounts").select("*").eq("status", "waiting_logout").execute()
-    if not res.data:
-        return await call.answer("No accounts waiting for logout!", show_alert=True)
-    text = "⚡ <b>Accounts with Multiple Devices:</b>\nClick to force logout all other devices instantly.\n\n"
-    buttons = []
-    for acc in res.data[:10]:
-        buttons.append([InlineKeyboardButton(text=f"⚡ Force Logout {acc['phone']}", callback_data=f"adforcelog_{acc['id']}")])
+    count = len(res.data) if res.data else 0
+    
+    buttons = [
+        [InlineKeyboardButton(text=f"🚀 Force Logout ALL Waiting Accounts ({count})", callback_data="adforcelog_all")]
+    ]
+    if res.data:
+        for acc in res.data[:10]:
+            buttons.append([InlineKeyboardButton(text=f"⚡ Logout {acc['phone']}", callback_data=f"adforcelog_{acc['id']}")])
     buttons.append([InlineKeyboardButton(text="🔙 Back", callback_data="adm_back")])
-    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+    
+    await call.message.edit_text(
+        f"⚡ <b>Force Logout Manager</b>\nWaiting for logout: {count} accounts.\nClick below to force logout all at once or individually:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML"
+    )
 
 @dp.callback_query(F.data.startswith("adforcelog_"))
 async def cb_admin_force_action(call: CallbackQuery):
-    acc_id = int(call.data.split("_")[1])
-    res = supabase.table("accounts").select("*").eq("id", acc_id).execute()
-    if not res.data: return
-    acc = res.data[0]
-    client = TelegramClient(
-        StringSession(acc["session_string"]), API_ID, API_HASH,
-        device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"]
-    )
-    try:
-        await client.connect()
-        await client(ResetAuthorizationsRequest())
-        await client.disconnect()
-        await finalize_account_confirmation(acc)
-        await call.answer("✅ Successfully forced logout and confirmed account!", show_alert=True)
-    except Exception as e:
-        try: await client.disconnect()
-        except: pass
-        await call.answer(f"❌ Failed: {e}", show_alert=True)
+    target = call.data.split("_")[1]
+    
+    if target == "all":
+        await call.answer("🚀 Processing force logout for ALL waiting accounts...", show_alert=True)
+        res = supabase.table("accounts").select("*").eq("status", "waiting_logout").execute()
+        if not res.data: return await call.answer("No accounts to logout!", show_alert=True)
+        
+        success_count = 0
+        for acc in res.data:
+            client = TelegramClient(
+                StringSession(acc["session_string"]), API_ID, API_HASH,
+                device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"]
+            )
+            try:
+                await client.connect()
+                await client(ResetAuthorizationsRequest())
+                await client.disconnect()
+                await finalize_account_confirmation(acc)
+                success_count += 1
+            except Exception:
+                try: await client.disconnect()
+                except: pass
+        await call.message.edit_text(f"✅ Successfully force logged out <b>{success_count}</b> accounts!", reply_markup=admin_main_kb(), parse_mode="HTML")
+    else:
+        acc_id = int(target)
+        res = supabase.table("accounts").select("*").eq("id", acc_id).execute()
+        if not res.data: return
+        acc = res.data[0]
+        client = TelegramClient(
+            StringSession(acc["session_string"]), API_ID, API_HASH,
+            device_model=acc["device_model"], system_version=acc["system_version"], app_version=acc["app_version"]
+        )
+        try:
+            await client.connect()
+            await client(ResetAuthorizationsRequest())
+            await client.disconnect()
+            await finalize_account_confirmation(acc)
+            await call.answer("✅ Successfully forced logout and confirmed account!", show_alert=True)
+        except Exception as e:
+            try: await client.disconnect()
+            except: pass
+            await call.answer(f"❌ Failed: {e}", show_alert=True)
 
-# --- COUNTRY MANAGEMENT (With Capacity Setting) ---
+# --- COUNTRY MANAGEMENT ---
 @dp.callback_query(F.data == "adm_countries")
 async def cb_adm_countries(call: CallbackQuery):
     if call.from_user.id != ADMIN_ID: return
@@ -440,7 +519,7 @@ async def step_c_proxy(message: Message, state: FSMContext):
         "is_active": True
     }).execute()
     await state.clear()
-    await message.answer(f"✅ Country <b>{data['name']}</b> saved with capacity <b>{data['cap']}</b>!", reply_markup=admin_main_kb(), parse_mode="HTML")
+    await message.answer(f"✅ Country <b>{data['name']}</b> saved!", reply_markup=admin_main_kb(), parse_mode="HTML")
 
 # --- EXPORT & BROADCAST & RESTART ---
 @dp.callback_query(F.data == "adm_export")
@@ -609,6 +688,7 @@ async def main():
         BotCommand(command="cancel", description="Cancel"),
         BotCommand(command="capacity", description="Capacity"),
         BotCommand(command="balance", description="Balance"),
+        BotCommand(command="withdraw", description="Withdraw"),
         BotCommand(command="help", description="Help")
     ], scope=BotCommandScopeDefault())
     await start_web_server()
