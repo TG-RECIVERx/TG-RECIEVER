@@ -85,7 +85,7 @@ def parse_proxy(proxy_str: str):
 
 def get_settings():
     res = supabase.table("bot_settings").select("*").eq("id", 1).execute()
-    return res.data[0] if res.data else {}
+    return res.data[0] if res.data else {"bot_active": True, "enable_2fa": True, "withdraw_enabled": True, "accept_multiple_devices": False}
 
 def match_country(phone: str):
     res = supabase.table("countries").select("*").eq("is_active", True).execute()
@@ -135,10 +135,10 @@ async def schedule_confirmation_check(account_id: int, user_id: int, phone: str,
 
     if not is_alive:
         supabase.table("accounts").update({"status": "rejected", "reject_reason": "Session dead before timer."}).eq("id", account_id).execute()
-        await bot.send_message(user_id, f"❌ <b>Account Rejected!</b>\nNumber: <code>{phone}</code>\nReason: Session logged out.", parse_mode="HTML")
+        await bot.send_message(user_id, f"❌ Account Rejected!\nNumber: <code>{phone}</code>\nReason: Session logged out.", parse_mode="HTML")
         return
 
-    # Multi-device logic: Bot chara onno device (phone) login thakle
+    # Multi-device check
     if dev_count > 1:
         if cfg.get("accept_multiple_devices", False):
             await finalize_account_confirmation(acc)
@@ -150,9 +150,9 @@ async def schedule_confirmation_check(account_id: int, user_id: int, phone: str,
             ])
             await bot.send_message(
                 user_id,
-                f"⚠️ <b>Multiple Devices Detected ({dev_count} devices)!</b>\n\n"
+                f"⚠️ Multiple Devices Detected ({dev_count} devices)!\n\n"
                 f"📱 Number: <code>{phone}</code>\n"
-                f"Confirmation time is over, but your phone/device is still logged in. Please log out from your phone and click below to get your balance!",
+                f"Please log out from your phone and click below to verify!",
                 reply_markup=kb, parse_mode="HTML"
             )
     else:
@@ -169,7 +169,7 @@ async def finalize_account_confirmation(acc: dict):
 
     await bot.send_message(
         acc["submitted_by"],
-        f"✅ <b>Account Confirmed!</b>\n\n📱 Number: <code>{acc['phone']}</code>\n💵 Reward Added: <b>+${acc['price']}</b>",
+        f"✅ Account Confirmed!\n\n📱 Number: <code>{acc['phone']}</code>\n💵 Reward Added: <b>+${acc['price']}</b>",
         parse_mode="HTML"
     )
 
@@ -249,7 +249,7 @@ async def cmd_balance(message: Message):
     u = res.data[0]
     await message.answer(f"👤 <b>Your Balance:</b> <b>${float(u['balance']):.2f}</b>\nSubmitted: {u['total_submitted']} | Confirmed: {u['total_confirmed']}", parse_mode="HTML")
 
-# --- WITHDRAW MENU & BUTTONS ---
+# --- WITHDRAW MENU & BUTTONS (FIXED) ---
 @dp.message(Command("withdraw"))
 async def cmd_withdraw(message: Message):
     uid = message.from_user.id
@@ -277,7 +277,7 @@ async def cb_user_withdraw(call: CallbackQuery):
 
     uid = call.from_user.id
     u_res = supabase.table("users").select("*").eq("user_id", uid).execute()
-    if not u_res.data: return call.answer("User not found!", show_alert=True)
+    if not u_res.data: return await call.answer("User not found!", show_alert=True)
     u = u_res.data[0]
     bal = float(u["balance"])
 
@@ -313,7 +313,7 @@ async def cb_user_withdraw(call: CallbackQuery):
 async def cmd_help(message: Message):
     await message.answer("ℹ️ Send phone number -> Enter OTP -> Wait for timer / logout -> Use /withdraw to cash out!", parse_mode="HTML")
 
-# ==================== ADMIN PANEL (FIXED WITHDRAW TOGGLE) ====================
+# ==================== ADMIN PANEL (FIXED TOGGLES) ====================
 def admin_main_kb():
     cfg = get_settings()
     b_st = "🟢 ON" if cfg.get("bot_active", True) else "🔴 OFF"
@@ -335,34 +335,47 @@ async def cmd_admin(message: Message):
 
 @dp.callback_query(F.data == "adm_back")
 async def cb_adm_back(call: CallbackQuery, state: FSMContext):
-    if call.from_user.id != ADMIN_ID: return
+    if message_from_id := call.from_user.id != ADMIN_ID: return
     await state.clear()
     await call.message.edit_text("🛠️ <b>Admin Control Panel</b>", reply_markup=admin_main_kb(), parse_mode="HTML")
 
 @dp.callback_query(F.data == "adm_toggle_bot")
 async def cb_toggle_bot(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID: return
     cfg = get_settings()
-    supabase.table("bot_settings").update({"bot_active": not cfg["bot_active"]}).eq("id", 1).execute()
+    new_val = not cfg.get("bot_active", True)
+    supabase.table("bot_settings").update({"bot_active": new_val}).eq("id", 1).execute()
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
+    await call.answer(f"Bot Active: {new_val}")
 
 @dp.callback_query(F.data == "adm_toggle_withdraw")
-async def cb_toggle_wd(call: CallbackQuery):
+async def cb_toggle_withdraw(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID: return
     cfg = get_settings()
     current_status = cfg.get("withdraw_enabled", True)
-    supabase.table("bot_settings").update({"withdraw_enabled": not current_status}).eq("id", 1).execute()
+    new_status = not current_status
+    supabase.table("bot_settings").update({"withdraw_enabled": new_status}).eq("id", 1).execute()
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
+    await call.answer(f"Withdraw Enabled: {new_status}")
 
 @dp.callback_query(F.data == "adm_toggle_2fa")
 async def cb_toggle_2fa(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID: return
     cfg = get_settings()
-    supabase.table("bot_settings").update({"enable_2fa": not cfg["enable_2fa"]}).eq("id", 1).execute()
+    new_val = not cfg.get("enable_2fa", True)
+    supabase.table("bot_settings").update({"enable_2fa": new_val}).eq("id", 1).execute()
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
+    await call.answer(f"2FA Enabled: {new_val}")
 
 @dp.callback_query(F.data == "adm_toggle_multi")
 async def cb_toggle_multi(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID: return
     cfg = get_settings()
-    supabase.table("bot_settings").update({"accept_multiple_devices": not cfg["accept_multiple_devices"]}).eq("id", 1).execute()
+    current_status = cfg.get("accept_multiple_devices", False)
+    new_status = not current_status
+    supabase.table("bot_settings").update({"accept_multiple_devices": new_status}).eq("id", 1).execute()
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
+    await call.answer(f"Multi-Device Accept: {new_status}")
 
 @dp.callback_query(F.data == "adm_rejected_list")
 async def cb_rejected_list(call: CallbackQuery):
